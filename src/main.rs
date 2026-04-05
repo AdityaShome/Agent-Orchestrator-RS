@@ -3,6 +3,7 @@ mod llm;
 mod models;
 
 use agents::planner::planner_prompt;
+use agents::worker::worker_prompt;
 use llm::provider::call_llm;
 use models::task::Plan;
 use std::io::{self, Write};
@@ -83,6 +84,11 @@ async fn main() {
         println!("Plan steps:");
         for (i, step) in plan.steps.iter().enumerate() {
             println!("{}. {}", i + 1, step);
+        }
+
+        if let Some(first_step) = plan.steps.first() {
+            let worker_response = call_llm(&worker_prompt(first_step)).await;
+            println!("\nWorker response for step 1:\n{}", worker_response);
         }
     }
 }
