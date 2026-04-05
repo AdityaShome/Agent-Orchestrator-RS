@@ -4,23 +4,6 @@ use crate::agents::worker::worker_prompt;
 use crate::llm::provider::call_llm;
 use crate::models::task::Plan;
 
-fn extract_text_from_response(raw: &str) -> Result<String, String> {
-    let v: serde_json::Value =
-        serde_json::from_str(raw).map_err(|e| format!("Invalid response JSON: {e}"))?;
-
-    let text = v
-        .get("candidates")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("content"))
-        .and_then(|c| c.get("parts"))
-        .and_then(|p| p.get(0))
-        .and_then(|p| p.get("text"))
-        .and_then(|t| t.as_str())
-        .ok_or_else(|| "Missing response text".to_string())?;
-
-    Ok(text.to_string())
-}
-
 fn extract_json_block(text: &str) -> Result<String, String> {
     if let Some(start) = text.find("```") {
         let after = &text[start + 3..];
@@ -44,30 +27,70 @@ fn extract_json_block(text: &str) -> Result<String, String> {
     Ok(text[start..=end].to_string())
 }
 
-fn parse_plan(raw: &str) -> Result<Plan, String> {
-    extract_text_from_response(raw)
-        .and_then(|text| extract_json_block(&text))
-        .and_then(|json| serde_json::from_str::<Plan>(&json).map_err(|e| e.to_string()))
+fn parse_plan(text: &str) -> Result<Plan, String> {
+    let json = extract_json_block(&text)?;
+
+    match serde_json::from_str::<Plan>(&json) {
+        Ok(plan) => Ok(plan),
+        Err(first_err) => {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) {
+                if let Some(steps) = value.get("steps").and_then(|s| s.as_array()) {
+                    let mut flattened = Vec::new();
+                    for step in steps {
+                        if let Some(s) = step.as_str() {
+                            flattened.push(s.to_string());
+                        } else if let Some(obj) = step.as_object() {
+                            if let Some(desc) = obj.get("description").and_then(|d| d.as_str()) {
+                                flattened.push(desc.to_string());
+                            }
+                        }
+                    }
+                    if !flattened.is_empty() {
+                        return Ok(Plan { steps: flattened });
+                    }
+                }
+            }
+            Err(first_err.to_string())
+        }
+    }
 }
 
 pub async fn run(task: &str) {
-    let plan_raw = call_llm(&planner_prompt(task)).await;
+    let plan_text = match call_llm(&planner_prompt(task)).await {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("Planner call failed: {}", err);
+            return;
+        }
+    };
 
-    let plan = match parse_plan(&plan_raw) {
+    let plan = match parse_plan(&plan_text) {
         Ok(plan) => plan,
         Err(err) => {
             eprintln!("Failed to parse plan JSON: {}", err);
-            eprintln!("Raw response:\n{}", plan_raw);
+            eprintln!("Raw response:\n{}", plan_text);
             return;
         }
     };
 
     let mut results = Vec::new();
     for step in &plan.steps {
-        let res = call_llm(&worker_prompt(step)).await;
+        let res = match call_llm(&worker_prompt(step)).await {
+            Ok(text) => text,
+            Err(err) => {
+                eprintln!("Worker call failed: {}", err);
+                return;
+            }
+        };
         results.push(res);
     }
 
-    let final_output = call_llm(&aggregator_prompt(&results)).await;
+    let final_output = match call_llm(&aggregator_prompt(&results)).await {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("Aggregator call failed: {}", err);
+            return;
+        }
+    };
     println!("{}", final_output);
 }
