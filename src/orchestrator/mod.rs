@@ -5,6 +5,7 @@ use crate::llm::provider::call_llm;
 use crate::models::task::Plan;
 
 fn extract_json_block(text: &str) -> Result<String, String> {
+    // Prefer fenced JSON blocks, but fall back to the first object span.
     if let Some(start) = text.find("```") {
         let after = &text[start + 3..];
         let after = if after.starts_with("json") {
@@ -28,6 +29,7 @@ fn extract_json_block(text: &str) -> Result<String, String> {
 }
 
 fn parse_plan(text: &str) -> Result<Plan, String> {
+    // Enforce the Plan schema, with a fallback to flatten object steps.
     let json = extract_json_block(&text)?;
 
     match serde_json::from_str::<Plan>(&json) {
@@ -56,6 +58,7 @@ fn parse_plan(text: &str) -> Result<Plan, String> {
 }
 
 pub async fn run(task: &str) {
+    // Planner phase: get JSON plan from the model.
     let plan_text = match call_llm(&planner_prompt(task)).await {
         Ok(text) => text,
         Err(err) => {
@@ -73,8 +76,15 @@ pub async fn run(task: &str) {
         }
     };
 
+    // Debug logging: plan and step outputs help diagnose agent behavior.
+    println!("Plan:");
+    for (i, step) in plan.steps.iter().enumerate() {
+        println!("{}. {}", i + 1, step);
+    }
+
     let mut results = Vec::new();
     for step in &plan.steps {
+        println!("\nRunning step: {}", step);
         let res = match call_llm(&worker_prompt(step)).await {
             Ok(text) => text,
             Err(err) => {
@@ -82,6 +92,7 @@ pub async fn run(task: &str) {
                 return;
             }
         };
+        println!("Step result:\n{}", res);
         results.push(res);
     }
 
@@ -92,5 +103,6 @@ pub async fn run(task: &str) {
             return;
         }
     };
+    println!("\nFinal output:");
     println!("{}", final_output);
 }
